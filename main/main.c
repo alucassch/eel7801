@@ -24,6 +24,17 @@
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
 
+#include "protocol_examples_common.h"
+#include "lwip/sockets.h"
+#include "lwip/dns.h"
+#include "lwip/netdb.h"
+
+#include "mqtt_client.h"
+
+void WaterMeasurementTask(void * pvParameters);
+void toggle_led();
+void process_mqtt_message(void * pvParameters);
+
 #define RMT_TX_CHANNEL 1 /* RMT channel for transmitter */
 #define RMT_TX_GPIO_NUM PIN_TRIGGER /* GPIO number for transmitter signal */
 #define RMT_RX_CHANNEL 0 /* RMT channel for receiver */
@@ -37,7 +48,8 @@
 
 #define PIN_TRIGGER 18
 #define PIN_ECHO 19
-#define PIN_RELAY    5
+#define PIN_RELAY 5
+#define ONBOARD_LED 2
 
 /*
 VCC AZUL
@@ -46,10 +58,11 @@ ECHO LARANJA
 TRIGGER MARROM
 */
 
+
 #define GPIO_OUTPUT_PIN_SEL  (1ULL<<PIN_RELAY)
 
-#define EXAMPLE_ESP_WIFI_SSID      "AROLDO2"
-#define EXAMPLE_ESP_WIFI_PASS      "schlichting"
+#define EXAMPLE_ESP_WIFI_SSID      "esptst"
+#define EXAMPLE_ESP_WIFI_PASS      "uapabiluba"
 #define EXAMPLE_ESP_MAXIMUM_RETRY  5
 
 #define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
@@ -62,98 +75,177 @@ static const adc_unit_t unit = ADC_UNIT_1;
 
 static EventGroupHandle_t s_wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
-static const char *TAG = "wifi station";
+static const char *TAG = "eel7801_TAG";
 static int s_retry_num = 0;
+
+esp_mqtt_client_handle_t mqtt_client = NULL;
+
+int wifi_connected = 0;
+
+typedef struct  {
+	int topic_len;
+	int data_len;
+	char* topic;
+	char* data;
+} mqtt_msg_struct_t;
+
+mqtt_msg_struct_t mqtt_msg;
+
+static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
+{
+    esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
+    // your_context_t *context = event->context;
+    switch (event->event_id) {
+        case MQTT_EVENT_CONNECTED:
+            ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+
+            msg_id = esp_mqtt_client_subscribe(client, "/topic/relay", 0);
+            ESP_LOGI(TAG, "sent subscribe successful (relay), msg_id=%d", msg_id);
+            msg_id = esp_mqtt_client_subscribe(client, "/topic/plant1", 0);
+            ESP_LOGI(TAG, "sent subscribe successful (plant1), msg_id=%d", msg_id);
+
+            break;
+        case MQTT_EVENT_DISCONNECTED:
+            ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+            break;
+
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+            break;
+        case MQTT_EVENT_UNSUBSCRIBED:
+            ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+            break;
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+            break;
+        case MQTT_EVENT_DATA:
+            ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+            printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+            printf("DATA=%.*s\r\n", event->data_len, event->data);
+            
+            mqtt_msg.topic_len = event->topic_len;
+            mqtt_msg.data_len = event->data_len;
+            mqtt_msg.topic = event->topic;
+            mqtt_msg.data = event->data;
+
+
+            xTaskCreate(process_mqtt_message, "Process MQTT data", 2048, &mqtt_msg, 1, NULL);
+
+            break;
+        case MQTT_EVENT_ERROR:
+            ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+            break;
+        default:
+            ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+            break;
+    }
+    return ESP_OK;
+}
+
 
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
-    switch(evt->event_id) {
-        case HTTP_EVENT_ERROR:
-            ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
-            break;
-        case HTTP_EVENT_ON_CONNECTED:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
-            break;
-        case HTTP_EVENT_HEADER_SENT:
-            ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
-            break;
-        case HTTP_EVENT_ON_HEADER:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
-            break;
-        case HTTP_EVENT_ON_DATA:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
-            if (!esp_http_client_is_chunked_response(evt->client)) {
-                // Write out data
-                // printf("%.*s", evt->data_len, (char*)evt->data);
-            }
+	switch(evt->event_id) {
+		case HTTP_EVENT_ERROR:
+			ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+			break;
+		case HTTP_EVENT_ON_CONNECTED:
+			ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+			break;
+		case HTTP_EVENT_HEADER_SENT:
+			ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+			break;
+		case HTTP_EVENT_ON_HEADER:
+			ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+			break;
+		case HTTP_EVENT_ON_DATA:
+			ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+			if (!esp_http_client_is_chunked_response(evt->client)) {
+				// Write out data
+				// printf("%.*s", evt->data_len, (char*)evt->data);
+			}
 
-            break;
-        case HTTP_EVENT_ON_FINISH:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
-            break;
-        case HTTP_EVENT_DISCONNECTED:
-            ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
-            break;
-    }
-    return ESP_OK;
+			break;
+		case HTTP_EVENT_ON_FINISH:
+			ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+			break;
+		case HTTP_EVENT_DISCONNECTED:
+			ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
+			break;
+	}
+	return ESP_OK;
 }
 
 
-static esp_err_t event_handler(void *ctx, system_event_t *event)
+static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
 {
-    switch(event->event_id) {
-    case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
-        break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-        ESP_LOGI(TAG, "got ip:%s",
-                 ip4addr_ntoa(&event->event_info.got_ip.ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-        {
-            if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
-                esp_wifi_connect();
-                xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-                s_retry_num++;
-                ESP_LOGI(TAG,"retry to connect to the AP");
-            }
-            ESP_LOGI(TAG,"connect to the AP fail\n");
-            break;
-        }
-    default:
-        break;
-    }
-    return ESP_OK;
+	switch(event->event_id) {
+	case SYSTEM_EVENT_STA_START:
+		esp_wifi_connect();
+		break;
+	case SYSTEM_EVENT_STA_GOT_IP:
+		ESP_LOGI(TAG, "got ip:%s",
+				 ip4addr_ntoa(&event->event_info.got_ip.ip_info.ip));
+		s_retry_num = 0;
+		wifi_connected = 1;
+		xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+		break;
+	case SYSTEM_EVENT_STA_DISCONNECTED:
+		{
+			if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
+				esp_wifi_connect();
+				xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+				s_retry_num++;
+				ESP_LOGI(TAG,"retry to connect to the AP");
+			}
+			ESP_LOGI(TAG,"connect to the AP fail\n");
+			break;
+		}
+	default:
+		break;
+	}
+	return ESP_OK;
 }
+
 static void check_efuse()
 {
-    //Check TP is burned into eFuse
-    if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_TP) == ESP_OK) {
-        printf("eFuse Two Point: Supported\n");
-    } else {
-        printf("eFuse Two Point: NOT supported\n");
-    }
+	//Check TP is burned into eFuse
+	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_TP) == ESP_OK) {
+		printf("eFuse Two Point: Supported\n");
+	} else {
+		printf("eFuse Two Point: NOT supported\n");
+	}
 
-    //Check Vref is burned into eFuse
-    if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF) == ESP_OK) {
-        printf("eFuse Vref: Supported\n");
-    } else {
-        printf("eFuse Vref: NOT supported\n");
-    }
+	//Check Vref is burned into eFuse
+	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF) == ESP_OK) {
+		printf("eFuse Vref: Supported\n");
+	} else {
+		printf("eFuse Vref: NOT supported\n");
+	}
 }
 
 static void print_char_val_type(esp_adc_cal_value_t val_type)
 {
-    if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
-        printf("Characterized using Two Point Value\n");
-    } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
-        printf("Characterized using eFuse Vref\n");
-    } else {
-        printf("Characterized using Default Vref\n");
-    }
+	if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
+		printf("Characterized using Two Point Value\n");
+	} else if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
+		printf("Characterized using eFuse Vref\n");
+	} else {
+		printf("Characterized using Default Vref\n");
+	}
 
+}
+
+static void mqtt_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .uri = "mqtt://ftaylsiy:dyygblVZaO0l@postman-01.cloudmqtt.com:17841",
+        .event_handle = mqtt_event_handler,
+    };
+
+    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_start(mqtt_client);
 }
 
 static void HCSR04_tx_init()
@@ -200,8 +292,8 @@ static void HCSR04_rx_init()
 
 static void HCSR04_init()
 {
-    HCSR04_tx_init();
-    HCSR04_rx_init();
+	HCSR04_tx_init();
+	HCSR04_rx_init();
 }
 
 static double HCSR04_measure(uint32_t num_measurements)
@@ -222,44 +314,44 @@ static double HCSR04_measure(uint32_t num_measurements)
 
 	distance = 0;
 
-    for (i=0; i<num_measurements; i++){
-        rmt_write_items(RMT_TX_CHANNEL, &item, 1, true);
+	for (i=0; i<num_measurements; i++){
+		rmt_write_items(RMT_TX_CHANNEL, &item, 1, true);
 		rmt_wait_tx_done(RMT_TX_CHANNEL, portMAX_DELAY);
 
 		rmt_item32_t* item = (rmt_item32_t*)xRingbufferReceive(rb, &rx_size, 1000);
 		distance += 100 * 340.29 * ITEM_DURATION(item->duration0) / (1000 * 1000 * 2); // distance in meters
-    	vRingbufferReturnItem(rb, (void*) item);
+		vRingbufferReturnItem(rb, (void*) item);
 		vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
-    //vRingbufferDelete(rb);
-    distance = distance/num_measurements;
-    return distance;
+	}
+	//vRingbufferDelete(rb);
+	distance = distance/num_measurements;
+	return distance;
 
 }
 
 void wifi_init_sta()
 {
-    s_wifi_event_group = xEventGroupCreate();
+	s_wifi_event_group = xEventGroupCreate();
 
-    tcpip_adapter_init();
-    ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL) );
+	tcpip_adapter_init();
+	ESP_ERROR_CHECK(esp_event_loop_init(wifi_event_handler, NULL) );
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_ESP_WIFI_SSID,
-            .password = EXAMPLE_ESP_WIFI_PASS
-        },
-    };
+	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+	wifi_config_t wifi_config = {
+		.sta = {
+			.ssid = EXAMPLE_ESP_WIFI_SSID,
+			.password = EXAMPLE_ESP_WIFI_PASS
+		},
+	};
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
-    ESP_ERROR_CHECK(esp_wifi_start() );
+	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
+	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+	ESP_ERROR_CHECK(esp_wifi_start() );
 
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
-    ESP_LOGI(TAG, "connect to ap SSID:%s password:%s",
-             EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+	ESP_LOGI(TAG, "wifi_init_sta finished.");
+	ESP_LOGI(TAG, "connect to ap SSID:%s password:%s",
+			 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
 }
 
 
@@ -267,109 +359,252 @@ void post_distance(float distance)
 {
 
 	esp_http_client_config_t config = {
-        .url = "https://tranquil-forest-64117.herokuapp.com/waterlevels/",
-        .event_handler = _http_event_handler,
-    };
+		.url = "https://tranquil-forest-64117.herokuapp.com/waterlevels/",
+		.event_handler = _http_event_handler,
+	};
 
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+	esp_http_client_handle_t client = esp_http_client_init(&config);
 
-    esp_err_t err = esp_http_client_perform(client);
+	esp_err_t err = esp_http_client_perform(client);
 
-    //char *post_data; //= "{\"water_level\": 0}"
-    char *post_data = malloc(25);
+	//char *post_data; //= "{\"water_level\": 0}"
+	char *post_data = malloc(25);
 
-    sprintf(post_data, "{\"water_level\": %.2f}", distance);
-    
-    esp_http_client_set_url(client, "https://tranquil-forest-64117.herokuapp.com/waterlevels/");
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
-    esp_http_client_set_post_field(client, post_data, strlen(post_data));
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
-                esp_http_client_get_status_code(client),
-                esp_http_client_get_content_length(client));
-    } else {
-        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
-    }
-    free(post_data);
-    esp_http_client_close(client);
+	sprintf(post_data, "{\"water_level\": %.2f}", distance);
+	
+	esp_http_client_set_url(client, "https://tranquil-forest-64117.herokuapp.com/waterlevels/");
+	esp_http_client_set_method(client, HTTP_METHOD_POST);
+	esp_http_client_set_post_field(client, post_data, strlen(post_data));
+	esp_http_client_set_header(client, "Content-Type", "application/json");
+	err = esp_http_client_perform(client);
+	if (err == ESP_OK) {
+		ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
+				esp_http_client_get_status_code(client),
+				esp_http_client_get_content_length(client));
+	} else {
+		ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+	}
+	free(post_data);
+	esp_http_client_close(client);
 	esp_http_client_cleanup(client);
 }
 
+void toggle_led()
+{
+
+    if (gpio_get_level(ONBOARD_LED) == 1) {
+    	printf("LED ON, NOW OFF\n");
+    	gpio_set_level(ONBOARD_LED, 0);
+    } else if (gpio_get_level(ONBOARD_LED) == 0){
+    	printf("LED OFF, NOW ON\n");
+    	gpio_set_level(ONBOARD_LED, 1);
+    } else {
+    	printf("ESCANGALHOU\n");
+    }
+
+}
+
+void init_main()
+{
+	printf("Config: IO\n");
+	/*gpio_config_t io_conf;
+	io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+	io_conf.mode = GPIO_MODE_OUTPUT;
+	io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
+	io_conf.pull_down_en = 0;
+	io_conf.pull_up_en = 0;
+	gpio_config(&io_conf);
+	gpio_set_level(PIN_RELAY, 0);*/
+
+	gpio_pad_select_gpio(ONBOARD_LED);
+    gpio_set_direction(ONBOARD_LED, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_level(ONBOARD_LED, 0);
+    gpio_set_level(ONBOARD_LED, 1);
+
+    gpio_pad_select_gpio(PIN_RELAY);
+    gpio_set_direction(PIN_RELAY, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_RELAY, 0);
+
+
+
+	printf("Init: HCSR04\n");
+	HCSR04_init();
+
+	printf("Init: System Flash\n");
+	esp_err_t ret = nvs_flash_init();
+	system_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		ESP_ERROR_CHECK(nvs_flash_erase());
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
+	
+	printf("Init: WiFi\n");
+
+	ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+	wifi_init_sta();
+
+	while (!wifi_connected) {
+		printf("Conectando WiFi...\n");
+		vTaskDelay(1000 / portTICK_PERIOD_MS);
+	}
+
+	printf("Check Efuse\n");
+	check_efuse();
+
+	printf("Init MQTT\n");
+	mqtt_app_start();
+
+
+}
+
+void WaterMeasurementTask(void * pvParameters)
+{
+	double distance;
+	uint32_t num_measurements;
+	uint32_t measurements_interval_s;
+
+	num_measurements = 10;
+	measurements_interval_s = 5;
+
+	distance = 123;
+	while(1){
+		//distance = HCSR04_measure(num_measurements);
+		printf("Distance:%f\n", distance);
+		//post_distance((float)distance);
+		vTaskDelay(measurements_interval_s*1000 / portTICK_PERIOD_MS);
+	}
+	vTaskDelete(0);
+}
+
+void process_mqtt_message(void *pvParameters)
+{
+	char* topic = "/topic/relay";
+	char* data = "1";
+
+	mqtt_msg_struct_t imqtt_msg = *(mqtt_msg_struct_t *) pvParameters;
+
+	if (strncmp(imqtt_msg.topic, topic, imqtt_msg.topic_len) == 0) {
+		if (strncmp(imqtt_msg.data, data, imqtt_msg.data_len) == 0){
+			toggle_led();
+		}
+	}
+	vTaskDelete(0);
+}
+
+
+void PlantSensorTask(void *pvParameters)
+{
+	int i = 0;
+
+	char buf[100];
+
+	while(1){
+		//ADC READ
+		sprintf(buf, "%d", i);
+		esp_mqtt_client_publish(mqtt_client, "/topic/plant1", buf, 0, 0, 0);
+		vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+		i++;
+	}
+	vTaskDelete(0);
+}
+
+
 void app_main()
 {
-    double distance;
-    uint32_t num_measurements;
-    gpio_config_t io_conf;
-    //disable interrupt
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    //set as output mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    //disable pull-up mode
-    io_conf.pull_up_en = 0;
-    //configure GPIO with the given settings
-    gpio_config(&io_conf);
-    gpio_set_level(PIN_RELAY, 0); 
-    HCSR04_init();
 
-    esp_err_t ret = nvs_flash_init();
-    system_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    	ESP_ERROR_CHECK(nvs_flash_erase());
-    	ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-    
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-    wifi_init_sta();
+	init_main();
 
-    check_efuse();
+	xTaskCreate(WaterMeasurementTask, "Water Measurement Task", 2048, NULL, 1, NULL);
+	xTaskCreate(PlantSensorTask, "Plant Sensor Task", 2048, NULL, 1, NULL);
+/*
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
+	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
+*/
 
-    //Configure ADC
-    if (unit == ADC_UNIT_1) {
-        adc1_config_width(ADC_WIDTH_BIT_12);
-        adc1_config_channel_atten(channel, atten);
-    } else {
-        adc2_config_channel_atten((adc2_channel_t)channel, atten);
-    }
+	/*
+	double distance;
+	uint32_t num_measurements;
+	gpio_config_t io_conf;
+	//disable interrupt
+	io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+	//set as output mode
+	io_conf.mode = GPIO_MODE_OUTPUT;
+	//bit mask of the pins that you want to set,e.g.GPIO18/19
+	io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
+	//disable pull-down mode
+	io_conf.pull_down_en = 0;
+	//disable pull-up mode
+	io_conf.pull_up_en = 0;
+	//configure GPIO with the given settings
+	gpio_config(&io_conf);
+	gpio_set_level(PIN_RELAY, 0); 
+	HCSR04_init();
 
-    //Characterize ADC
-    adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
-    esp_adc_cal_value_t val_type = esp_adc_cal_characterize(unit, atten, ADC_WIDTH_BIT_12, DEFAULT_VREF, adc_chars);
-    print_char_val_type(val_type);
+	esp_err_t ret = nvs_flash_init();
+	system_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		ESP_ERROR_CHECK(nvs_flash_erase());
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
+	
+	ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+	wifi_init_sta();
 
-    vTaskDelay(2000/portTICK_PERIOD_MS);
-    num_measurements = 10;
-    while(1){
-    	//distance = HCSR04_measure(num_measurements);
-       
-   		//printf("%f\n", distance);
-   		//post_distance((float)distance);
-   		vTaskDelay(1000 / portTICK_PERIOD_MS);
+	check_efuse();
 
-         uint32_t adc_reading = 0;
-        //Multisampling
-        for (int i = 0; i < NO_OF_SAMPLES; i++) {
-            if (unit == ADC_UNIT_1) {
-                adc_reading += adc1_get_raw((adc1_channel_t)channel);
-            } else {
-                int raw;
-                adc2_get_raw((adc2_channel_t)channel, ADC_WIDTH_BIT_12, &raw);
-                adc_reading += raw;
-            }
-        }
-        adc_reading /= NO_OF_SAMPLES;
-        //Convert adc_reading to voltage in mV
-        uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
-        printf("Raw: %d\tVoltage: %dmV\n", adc_reading, voltage);
+	//Configure ADC
+	if (unit == ADC_UNIT_1) {
+		adc1_config_width(ADC_WIDTH_BIT_12);
+		adc1_config_channel_atten(channel, atten);
+	} else {
+		adc2_config_channel_atten((adc2_channel_t)channel, atten);
+	}
 
-    }
-    
-    
+	//Characterize ADC
+	adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
+	esp_adc_cal_value_t val_type = esp_adc_cal_characterize(unit, atten, ADC_WIDTH_BIT_12, DEFAULT_VREF, adc_chars);
+	print_char_val_type(val_type);
+
+	vTaskDelay(2000/portTICK_PERIOD_MS);
+	num_measurements = 10;
+	while(1){
+		//distance = HCSR04_measure(num_measurements);
+	   
+		//printf("%f\n", distance);
+		//post_distance((float)distance);
+		vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+		 uint32_t adc_reading = 0;
+		//Multisampling
+		for (int i = 0; i < NO_OF_SAMPLES; i++) {
+			if (unit == ADC_UNIT_1) {
+				adc_reading += adc1_get_raw((adc1_channel_t)channel);
+			} else {
+				int raw;
+				adc2_get_raw((adc2_channel_t)channel, ADC_WIDTH_BIT_12, &raw);
+				adc_reading += raw;
+			}
+		}
+		adc_reading /= NO_OF_SAMPLES;
+		//Convert adc_reading to voltage in mV
+		uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
+		printf("Raw: %d\tVoltage: %dmV\n", adc_reading, voltage);
+
+	}*/
+	
+	
 }
 
