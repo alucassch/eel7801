@@ -31,9 +31,10 @@
 
 #include "mqtt_client.h"
 
-void WaterMeasurementTask(void * pvParameters);
+void WaterMeasurementTask(void *pvParameters);
 void toggle_led();
-void process_mqtt_message(void * pvParameters);
+void process_mqtt_message(void *pvParameters);
+void RelayController(void *pvParameters);
 
 #define RMT_TX_CHANNEL 1 /* RMT channel for transmitter */
 #define RMT_TX_GPIO_NUM PIN_TRIGGER /* GPIO number for transmitter signal */
@@ -78,6 +79,8 @@ const int WIFI_CONNECTED_BIT = BIT0;
 static const char *TAG = "eel7801_TAG";
 static int s_retry_num = 0;
 
+static const double minDistance;
+
 esp_mqtt_client_handle_t mqtt_client = NULL;
 
 int wifi_connected = 0;
@@ -89,6 +92,14 @@ typedef struct  {
 	char* data;
 } mqtt_msg_struct_t;
 
+typedef struct {
+	double minDistance;
+	bool relayActive;
+	int relayPeriod;
+	int relayDutyCycle;
+} relayStatus;
+
+static relayStatus relaystatus;
 mqtt_msg_struct_t mqtt_msg;
 
 static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
@@ -425,8 +436,6 @@ void init_main()
     gpio_set_direction(PIN_RELAY, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_RELAY, 0);
 
-
-
 	printf("Init: HCSR04\n");
 	HCSR04_init();
 
@@ -455,6 +464,11 @@ void init_main()
 	printf("Init MQTT\n");
 	mqtt_app_start();
 
+	//relaystatus.minDistance = HCSR04_measure(20);
+	relaystatus.minDistance = 42.56;
+	relaystatus.relayActive = false;
+	relaystatus.relayPeriod = 10;
+	relaystatus.relayDutyCycle = 50;
 
 }
 
@@ -470,6 +484,7 @@ void WaterMeasurementTask(void * pvParameters)
 	distance = 123;
 	while(1){
 		//distance = HCSR04_measure(num_measurements);
+		distance = 42.56;
 		printf("Distance:%f\n", distance);
 		//post_distance((float)distance);
 		vTaskDelay(measurements_interval_s*1000 / portTICK_PERIOD_MS);
@@ -485,13 +500,40 @@ void process_mqtt_message(void *pvParameters)
 	mqtt_msg_struct_t imqtt_msg = *(mqtt_msg_struct_t *) pvParameters;
 
 	if (strncmp(imqtt_msg.topic, topic, imqtt_msg.topic_len) == 0) {
-		if (strncmp(imqtt_msg.data, data, imqtt_msg.data_len) == 0){
-			toggle_led();
+		if (strncmp(imqtt_msg.data, data, imqtt_msg.data_len) == 0) {
+			if (!relaystatus.relayActive) {
+				xTaskCreate(RelayController, "Relay Controller", 2048, NULL, 1, NULL);
+				relaystatus.relayActive = true;
+			} else {
+				printf("Valvula ja em funcionamento!!\n");
+			}
 		}
 	}
 	vTaskDelete(0);
 }
 
+void RelayController(void *pvParameters)
+{
+	float distance;
+	float on_time = relaystatus.relayDutyCycle/100*relaystatus.relayPeriod;
+	float off_time = relaystatus.relayPeriod - on_time;
+
+	//distance = HCSR04_measure(20);
+	distance = 45.56;
+
+	while (distance > relaystatus.minDistance) {
+		gpio_set_level(PIN_RELAY, 1);
+		vTaskDelay(on_time*1000 / portTICK_PERIOD_MS);
+		gpio_set_level(PIN_RELAY, 0);
+		vTaskDelay(off_time*1000 / portTICK_PERIOD_MS);
+		//distance = HCSR04_measure(10);
+		distance = 46.78;
+	}
+
+	gpio_set_level(PIN_RELAY, 0);
+	relaystatus.relayActive = false;
+	vTaskDelete(0);
+}
 
 void PlantSensorTask(void *pvParameters)
 {
@@ -512,6 +554,7 @@ void PlantSensorTask(void *pvParameters)
 	print_char_val_type(val_type);
 
 	uint32_t adc_reading = 0;
+	uint32_t voltage;
 
 	while(1){
 		//ADC READ
@@ -526,11 +569,11 @@ void PlantSensorTask(void *pvParameters)
 		}
 		adc_reading /= NO_OF_SAMPLES;
 		//Convert adc_reading to voltage in mV
-		uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
+		voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
 		printf("Raw: %d\tVoltage: %dmV\n", adc_reading, voltage);
 
 		sprintf(buf, "%d", i);
-		//esp_mqtt_client_publish(mqtt_client, "/topic/plant1", buf, 0, 0, 0);
+		esp_mqtt_client_publish(mqtt_client, "/topic/plant1", buf, 0, 0, 0);
 		vTaskDelay(2*1000 / portTICK_PERIOD_MS);
 		i++;
 	}
