@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -23,12 +22,10 @@
 #include "esp_http_client.h"
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
-
 #include "protocol_examples_common.h"
 #include "lwip/sockets.h"
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
-
 #include "mqtt_client.h"
 
 void WaterMeasurementTask(void *pvParameters);
@@ -36,17 +33,15 @@ void toggle_led();
 void process_mqtt_message(void *pvParameters);
 void RelayController(void *pvParameters);
 
-#define RMT_TX_CHANNEL 1 /* RMT channel for transmitter */
-#define RMT_TX_GPIO_NUM PIN_TRIGGER /* GPIO number for transmitter signal */
-#define RMT_RX_CHANNEL 0 /* RMT channel for receiver */
-#define RMT_RX_GPIO_NUM PIN_ECHO /* GPIO number for receiver */
-#define RMT_CLK_DIV 100 /* RMT counter clock divider */
-#define RMT_TX_CARRIER_EN 0 /* Disable carrier */
-#define rmt_item32_tIMEOUT_US 9500 /*!< RMT receiver timeout value(us) */
-
-#define RMT_TICK_10_US (80000000/RMT_CLK_DIV/100000) /* RMT counter value for 10 us.(Source clock is APB clock) */
+#define RMT_TX_CHANNEL 1 
+#define RMT_TX_GPIO_NUM PIN_TRIGGER 
+#define RMT_RX_CHANNEL 0
+#define RMT_RX_GPIO_NUM PIN_ECHO
+#define RMT_CLK_DIV 100 
+#define RMT_TX_CARRIER_EN 0
+#define rmt_item32_tIMEOUT_US 9500 
+#define RMT_TICK_10_US (80000000/RMT_CLK_DIV/100000) 
 #define ITEM_DURATION(d) ((d & 0x7fff)*10/RMT_TICK_10_US)
-
 #define PIN_TRIGGER 18
 #define PIN_ECHO 19
 #define PIN_RELAY 5
@@ -61,13 +56,11 @@ TRIGGER MARROM
 
 
 #define GPIO_OUTPUT_PIN_SEL  (1ULL<<PIN_RELAY)
-
 #define EXAMPLE_ESP_WIFI_SSID      "esptst"
 #define EXAMPLE_ESP_WIFI_PASS      "uapabiluba"
 #define EXAMPLE_ESP_MAXIMUM_RETRY  5
-
 #define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
-#define NO_OF_SAMPLES   64          //Multisampling
+#define NO_OF_SAMPLES   64         
 
 static esp_adc_cal_characteristics_t *adc_chars;
 static const adc_channel_t channel = ADC_CHANNEL_7;     //GPIO34 if ADC1, GPIO14 if ADC2
@@ -78,11 +71,8 @@ static EventGroupHandle_t s_wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
 static const char *TAG = "eel7801_TAG";
 static int s_retry_num = 0;
-
 static const double minDistance;
-
 esp_mqtt_client_handle_t mqtt_client = NULL;
-
 int wifi_connected = 0;
 
 typedef struct  {
@@ -221,14 +211,12 @@ static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
 
 static void check_efuse()
 {
-	//Check TP is burned into eFuse
 	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_TP) == ESP_OK) {
 		printf("eFuse Two Point: Supported\n");
 	} else {
 		printf("eFuse Two Point: NOT supported\n");
 	}
 
-	//Check Vref is burned into eFuse
 	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF) == ESP_OK) {
 		printf("eFuse Vref: Supported\n");
 	} else {
@@ -316,7 +304,7 @@ static double HCSR04_measure(uint32_t num_measurements)
 	item.level0 = 1;
 	item.duration0 = RMT_TICK_10_US;
 	item.level1 = 0;
-	item.duration1 = RMT_TICK_10_US; // for one pulse this doesn't matter
+	item.duration1 = RMT_TICK_10_US; 
 
 	size_t rx_size = 0;
 	RingbufHandle_t rb = NULL;
@@ -588,93 +576,6 @@ void app_main()
 
 	xTaskCreate(WaterMeasurementTask, "Water Measurement Task", 2048, NULL, 1, NULL);
 	xTaskCreate(PlantSensorTask, "Plant Sensor Task", 2048, NULL, 1, NULL);
-/*
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-	vTaskDelay(2*1000 / portTICK_PERIOD_MS);
-	esp_mqtt_client_publish(mqtt_client, "/topic/plant1", "teste", 0, 0, 0);
-*/
-
-	/*
-	double distance;
-	uint32_t num_measurements;
-	gpio_config_t io_conf;
-	//disable interrupt
-	io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-	//set as output mode
-	io_conf.mode = GPIO_MODE_OUTPUT;
-	//bit mask of the pins that you want to set,e.g.GPIO18/19
-	io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
-	//disable pull-down mode
-	io_conf.pull_down_en = 0;
-	//disable pull-up mode
-	io_conf.pull_up_en = 0;
-	//configure GPIO with the given settings
-	gpio_config(&io_conf);
-	gpio_set_level(PIN_RELAY, 0); 
-	HCSR04_init();
-
-	esp_err_t ret = nvs_flash_init();
-	system_init();
-	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-		ESP_ERROR_CHECK(nvs_flash_erase());
-		ret = nvs_flash_init();
-	}
-	ESP_ERROR_CHECK(ret);
-	
-	ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-	wifi_init_sta();
-
-	check_efuse();
-
-	//Configure ADC
-	if (unit == ADC_UNIT_1) {
-		adc1_config_width(ADC_WIDTH_BIT_12);
-		adc1_config_channel_atten(channel, atten);
-	} else {
-		adc2_config_channel_atten((adc2_channel_t)channel, atten);
-	}
-
-	//Characterize ADC
-	adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
-	esp_adc_cal_value_t val_type = esp_adc_cal_characterize(unit, atten, ADC_WIDTH_BIT_12, DEFAULT_VREF, adc_chars);
-	print_char_val_type(val_type);
-
-	vTaskDelay(2000/portTICK_PERIOD_MS);
-	num_measurements = 10;
-	while(1){
-		//distance = HCSR04_measure(num_measurements);
-	   
-		//printf("%f\n", distance);
-		//post_distance((float)distance);
-		vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-		 uint32_t adc_reading = 0;
-		//Multisampling
-		for (int i = 0; i < NO_OF_SAMPLES; i++) {
-			if (unit == ADC_UNIT_1) {
-				adc_reading += adc1_get_raw((adc1_channel_t)channel);
-			} else {
-				int raw;
-				adc2_get_raw((adc2_channel_t)channel, ADC_WIDTH_BIT_12, &raw);
-				adc_reading += raw;
-			}
-		}
-		adc_reading /= NO_OF_SAMPLES;
-		//Convert adc_reading to voltage in mV
-		uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
-		printf("Raw: %d\tVoltage: %dmV\n", adc_reading, voltage);
-
-	}*/
 	
 	
 }
