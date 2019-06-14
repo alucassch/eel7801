@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -23,12 +22,10 @@
 #include "esp_http_client.h"
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
-
 #include "protocol_examples_common.h"
 #include "lwip/sockets.h"
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
-
 #include "mqtt_client.h"
 
 #include "dht11.h"
@@ -42,6 +39,7 @@ void toggle_led();
 void RelayController(void *pvParameters);
 int voltage2moisture(int voltage);
 
+
 #define RMT_TX_CHANNEL 1
 #define RMT_TX_GPIO_NUM PIN_TRIGGER
 #define RMT_RX_CHANNEL 0
@@ -51,20 +49,19 @@ int voltage2moisture(int voltage);
 #define rmt_item32_tIMEOUT_US 9500
 
 #define RMT_TICK_10_US (80000000/RMT_CLK_DIV/100000)
-#define ITEM_DURATION(d) ((d & 0x7fff)*10/RMT_TICK_10_US)
 
+#define ITEM_DURATION(d) ((d & 0x7fff)*10/RMT_TICK_10_US)
 #define PIN_TRIGGER 18
 #define PIN_ECHO 19
 #define PIN_RELAY 5
 #define ONBOARD_LED 2
 
 #define GPIO_OUTPUT_PIN_SEL  (1ULL<<PIN_RELAY)
-
 #define EXAMPLE_ESP_WIFI_SSID      "esptst"
 #define EXAMPLE_ESP_WIFI_PASS      "uapabiluba"
 #define EXAMPLE_ESP_MAXIMUM_RETRY  5
 #define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
-#define NO_OF_SAMPLES   64          //Multisampling
+#define NO_OF_SAMPLES   64         
 
 #define NUM_DISTANCE_MEASUREMENTS 10
 #define DISTANCE_MEASUREMENTS_UPDATE_INTERVAL 10
@@ -241,14 +238,12 @@ static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
 
 static void check_efuse()
 {
-	//Check TP is burned into eFuse
 	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_TP) == ESP_OK) {
 		printf("eFuse Two Point: Supported\n");
 	} else {
 		printf("eFuse Two Point: NOT supported\n");
 	}
 
-	//Check Vref is burned into eFuse
 	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF) == ESP_OK) {
 		printf("eFuse Vref: Supported\n");
 	} else {
@@ -335,7 +330,7 @@ static double HCSR04_measure(uint32_t num_measurements)
 	item.level0 = 1;
 	item.duration0 = RMT_TICK_10_US;
 	item.level1 = 0;
-	item.duration1 = RMT_TICK_10_US; // for one pulse this doesn't matter
+	item.duration1 = RMT_TICK_10_US; 
 
 	size_t rx_size = 0;
 	RingbufHandle_t rb = NULL;
@@ -663,7 +658,6 @@ void MQTTMessagePlantSensorTask(void *pvParameters)
 	vTaskDelay(HUMIDITY_MEASUREMENTS_UPDATE_INTERVAL*1000/portTICK_PERIOD_MS);
 	buf = malloc(20);
 
-
 	while(1){
 		sprintf(buf, "%d", (int)my_status.last_measured_moisture);
 		printf("MQTT publish soil moisture: %s\n",buf);
@@ -708,7 +702,6 @@ void app_main()
 {
 
 	init_main();
-
 	
 	xTaskCreate(WaterMeasurementTask, "Water Measurement Task", 2048, NULL, 1, NULL);
 	xTaskCreate(PostWaterMeasurementTask, "Post Water Measurement Task", 2048, NULL, 1, NULL);
