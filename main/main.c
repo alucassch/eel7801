@@ -31,7 +31,6 @@
 #include "dht11.h"
 
 void WaterMeasurementTask(void *pvParameters);
-void PostWaterMeasurementTask(void *pvParameters);
 void PlantSensorTask(void *pvParameters);
 void MQTTMessagePlantSensorTask(void *pvParameters);
 void toggle_led();
@@ -64,7 +63,7 @@ int voltage2moisture(int voltage);
 #define NO_OF_SAMPLES   64         
 
 #define NUM_DISTANCE_MEASUREMENTS 10
-#define DISTANCE_MEASUREMENTS_UPDATE_INTERVAL 10
+#define DISTANCE_MEASUREMENTS_UPDATE_INTERVAL 1
 #define DISTANCE_MEASUREMENTS_POST_INTERVAL 10
 #define HUMIDITY_MEASUREMENTS_UPDATE_INTERVAL 10
 #define HUMIDITY_MEASUREMENTS_MQTT_INTERVAL 10
@@ -147,9 +146,12 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 					if (my_status.relaystatus.relayActive == false) {
 						my_status.relaystatus.relayActive = true;
 						printf("CHANGE RELAY STATUS ON\n");
+						esp_mqtt_client_publish(mqtt_client, "/topic/relaystatus", "ON", 0, 0, 1);
 						xTaskCreate(RelayController, "Relay Controller Task", 2048, NULL, 1, &my_status.relayxHandle);
 					} else if (my_status.relaystatus.relayActive == true && my_status.relayxHandle != NULL) {
 						printf("CHANGE RELAY STATUS OFF\n");
+						esp_mqtt_client_publish(mqtt_client, "/topic/relaystatus", "OFF", 0, 0, 1);
+
 						vTaskDelete(my_status.relayxHandle);
 						my_status.relayxHandle = NULL;
 						my_status.relaystatus.relayActive = false;
@@ -157,11 +159,8 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 					} else {
 						printf("ESCANGALHOU\n");
 					}
-					
 				}
-
             }
-
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -378,75 +377,6 @@ static void wifi_init_sta()
 			 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
 }
 
-static void post_distance(double distance)
-{
-
-	esp_http_client_config_t config = {
-		//.url = "https://tranquil-forest-64117.herokuapp.com/waterlevels/",
-		.url = "http://192.168.2.1:8123/waterlevels/",
-		.event_handler = _http_event_handler,
-	};
-
-	esp_http_client_handle_t client = esp_http_client_init(&config);
-
-	esp_err_t err = esp_http_client_perform(client);
-
-	//char *post_data; //= "{\"water_level\": 0}"
-	char *post_data = malloc(25);
-
-	sprintf(post_data, "{\"water_level\": %.2f}", distance);
-	
-	esp_http_client_set_url(client, "http://192.168.2.1:8123/waterlevels/");
-	esp_http_client_set_method(client, HTTP_METHOD_POST);
-	esp_http_client_set_post_field(client, post_data, strlen(post_data));
-	esp_http_client_set_header(client, "Content-Type", "application/json");
-	err = esp_http_client_perform(client);
-	if (err == ESP_OK) {
-		ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
-				esp_http_client_get_status_code(client),
-				esp_http_client_get_content_length(client));
-	} else {
-		ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
-	}
-	free(post_data);
-	esp_http_client_close(client);
-	esp_http_client_cleanup(client);
-}
-
-static void post_humidity(int humidity)
-{
-
-	esp_http_client_config_t config = {
-		//.url = "https://tranquil-forest-64117.herokuapp.com/waterlevels/",
-		.url = "http://192.168.2.1:8123/humidities/",
-		.event_handler = _http_event_handler,
-	};
-
-	esp_http_client_handle_t client = esp_http_client_init(&config);
-
-	esp_err_t err = esp_http_client_perform(client);
-
-	//char *post_data; //= "{\"water_level\": 0}"
-	char *post_data = malloc(25);
-
-	sprintf(post_data, "{\"humidity\": %d}", humidity);
-	
-	esp_http_client_set_url(client, "http://192.168.2.1:8123/humidities/");
-	esp_http_client_set_method(client, HTTP_METHOD_POST);
-	esp_http_client_set_post_field(client, post_data, strlen(post_data));
-	esp_http_client_set_header(client, "Content-Type", "application/json");
-	err = esp_http_client_perform(client);
-	if (err == ESP_OK) {
-		ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
-				esp_http_client_get_status_code(client),
-				esp_http_client_get_content_length(client));
-	} else {
-		ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
-	}
-	free(post_data);
-	esp_http_client_close(client);
-	esp_http_client_cleanup(client);
-}
 
 
 void toggle_led()
@@ -536,44 +466,52 @@ void init_main()
 
 void WaterMeasurementTask(void *pvParameters)
 {
+	char *buf = malloc(20);
+	char *post_data = malloc(25);
+	int count = 0;
+	esp_http_client_config_t config = {
+		.url = "https://tranquil-forest-64117.herokuapp.com/waterlevels/",
+		.event_handler = _http_event_handler,
+	};
 
+	esp_http_client_handle_t client = esp_http_client_init(&config);
+
+	esp_err_t err = esp_http_client_perform(client);
+
+	//char *post_data; //= "{\"water_level\": 0}"
+
+	esp_http_client_set_url(client, "https://tranquil-forest-64117.herokuapp.com/waterlevels/");
+	esp_http_client_set_method(client, HTTP_METHOD_POST);
+	esp_http_client_set_header(client, "Content-Type", "application/json");
 	while (1) {
 		my_status.last_measured_distance = HCSR04_measure(NUM_DISTANCE_MEASUREMENTS);
+		printf("Last measured distance:%f\n", my_status.last_measured_distance);
+		sprintf(buf, "%.2f cm", my_status.last_measured_distance);
+		esp_mqtt_client_publish(mqtt_client, "/topic/distance", buf, 0, 0, 0);
+		
+		if (count == 10) {
+			printf("Posting distance:%f\n", my_status.last_measured_distance);
+			sprintf(post_data, "{\"water_level\": %.2f}", my_status.last_measured_distance);
+			esp_http_client_set_post_field(client, post_data, strlen(post_data));
+			err = esp_http_client_perform(client);
+			if (err == ESP_OK) {
+				ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
+						esp_http_client_get_status_code(client),
+						esp_http_client_get_content_length(client));
+			} else {
+				ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+			}
+			count = 0;
+		}
+		count ++;
 		vTaskDelay(DISTANCE_MEASUREMENTS_UPDATE_INTERVAL*1000/portTICK_PERIOD_MS);
-		printf("Measured last distance:%f\n", my_status.last_measured_distance);
 	}
+	free(post_data);
+	esp_http_client_close(client);
+	esp_http_client_cleanup(client);
 
 	vTaskDelete(0);
 }
-
-
-void PostWaterMeasurementTask(void *pvParameters)
-{
-	double post_measured_distance;
-
-	while(1){
-		post_measured_distance = my_status.last_measured_distance;
-		printf("Posting distance:%f\n", post_measured_distance);
-		post_distance(post_measured_distance);
-		vTaskDelay(DISTANCE_MEASUREMENTS_POST_INTERVAL*1000 / portTICK_PERIOD_MS);
-	}
-	vTaskDelete(0);
-}
-
-/*void process_mqtt_message(void *pvParameters)
-{
-	char* topic = "/topic/relay";
-	char* data = "1";
-
-	mqtt_msg_struct_t imqtt_msg = *(mqtt_msg_struct_t *) pvParameters;
-
-	if (strncmp(imqtt_msg.topic, topic, imqtt_msg.topic_len) == 0) 
-		if (strncmp(imqtt_msg.data, data, imqtt_msg.data_len) == 0) 
-				my_status.relaystatus.relayActive = !my_status.relaystatus.relayActive;
-
-	my_status.mqtt_message_listener = true;
-	vTaskDelete(0);
-}*/
 
 void RelayController(void *pvParameters)
 {
@@ -642,9 +580,8 @@ void PlantSensorTask(void *pvParameters)
 		voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
 		my_status.last_measured_moisture = voltage2moisture(voltage);
 		printf("Raw: %d\tVoltage: %dmV\n", adc_reading, voltage);
-		sprintf(buf, "%d", my_status.last_measured_moisture);
+		sprintf(buf, "%d %%", my_status.last_measured_moisture);
 		esp_mqtt_client_publish(mqtt_client, "/topic/plant1", buf, 0, 0, 0);
-		post_humidity( my_status.last_measured_moisture);
 		vTaskDelay(HUMIDITY_MEASUREMENTS_UPDATE_INTERVAL*1000 / portTICK_PERIOD_MS);
 	}
 
@@ -679,9 +616,9 @@ void DH11SensorTask(void *pvParameters)
 	while(1) {
 		str =  DHT11_read();
 		if (str.status == 0) {
-			sprintf(buf, "%d", (int)str.temperature);
+			sprintf(buf, "%d °C", (int)str.temperature);
 			esp_mqtt_client_publish(mqtt_client, "/topic/temperature", buf, 0, 0, 0);
-			sprintf(buf, "%d", (int)str.humidity);
+			sprintf(buf, "%d %%", (int)str.humidity);
 			esp_mqtt_client_publish(mqtt_client, "/topic/humidity", buf, 0, 0, 0);
 			printf("DHT11: status:%d temperature:%d humidity:%d\n", str.status, str.temperature, str.humidity);
 		} else {
@@ -697,21 +634,21 @@ void DH11SensorTask(void *pvParameters)
 }
 
 
-
 void app_main()
 {
 
 	init_main();
 	
-	xTaskCreate(WaterMeasurementTask, "Water Measurement Task", 2048, NULL, 1, NULL);
-	xTaskCreate(PostWaterMeasurementTask, "Post Water Measurement Task", 2048, NULL, 1, NULL);
+	xTaskCreate(WaterMeasurementTask, "Water Measurement Task", 4096, NULL, 1, NULL);
 
 	xTaskCreate(PlantSensorTask, "Plant Sensor Task", 2048, NULL, 1, NULL);
 	xTaskCreate(MQTTMessagePlantSensorTask, "Plant Sensor Task", 2048, NULL, 1, NULL);
 
 	xTaskCreate(DH11SensorTask, "Plant Sensor Task", 2048, NULL, 1, NULL);
 
-	gpio_set_level(ONBOARD_LED,1);
+	gpio_set_level(ONBOARD_LED,0);
+	esp_mqtt_client_publish(mqtt_client, "/topic/relaystatus", "OFF", 0, 0, 1);
+
 	
 }
 
