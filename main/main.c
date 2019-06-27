@@ -22,13 +22,15 @@
 #include "esp_http_client.h"
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
-#include "protocol_examples_common.h"
+//#include "protocol_examples_common.h"
 #include "lwip/sockets.h"
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
 #include "mqtt_client.h"
 
 #include "dht11.h"
+#include "ultrasonic.h"
+
 
 void WaterMeasurementTask(void *pvParameters);
 void PlantSensorTask(void *pvParameters);
@@ -49,6 +51,8 @@ int voltage2moisture(int voltage);
 
 #define RMT_TICK_10_US (80000000/RMT_CLK_DIV/100000)
 
+#define MAX_DISTANCE_CM 500 // 5m max
+
 #define ITEM_DURATION(d) ((d & 0x7fff)*10/RMT_TICK_10_US)
 #define PIN_TRIGGER 18
 #define PIN_ECHO 19
@@ -56,8 +60,8 @@ int voltage2moisture(int voltage);
 #define ONBOARD_LED 2
 
 #define GPIO_OUTPUT_PIN_SEL  (1ULL<<PIN_RELAY)
-#define EXAMPLE_ESP_WIFI_SSID      "esptst"
-#define EXAMPLE_ESP_WIFI_PASS      "uapabiluba"
+#define EXAMPLE_ESP_WIFI_SSID      "Palacio do Planalto"
+#define EXAMPLE_ESP_WIFI_PASS      "polipoli"
 #define EXAMPLE_ESP_MAXIMUM_RETRY  5
 #define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
 #define NO_OF_SAMPLES   64         
@@ -75,7 +79,7 @@ static const adc_unit_t unit = ADC_UNIT_1;
 
 static EventGroupHandle_t s_wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
-static const char *TAG = "eel7801_TAG";
+static const char *TAG = "iot_project_tag";
 static int s_retry_num = 0;
 
 esp_mqtt_client_handle_t mqtt_client = NULL;
@@ -341,15 +345,15 @@ static double HCSR04_measure(uint32_t num_measurements)
 	for (i=0; i<num_measurements; i++){
 		rmt_write_items(RMT_TX_CHANNEL, &item, 1, true);
 		rmt_wait_tx_done(RMT_TX_CHANNEL, portMAX_DELAY);
-
 		rmt_item32_t* item = (rmt_item32_t*)xRingbufferReceive(rb, &rx_size, 1000);
 		distance += 100 * 340.29 * ITEM_DURATION(item->duration0) / (1000 * 1000 * 2); // distance in meters
 		vRingbufferReturnItem(rb, (void*) item);
-		vTaskDelay(200 / portTICK_PERIOD_MS);
+		vTaskDelay(300 / portTICK_PERIOD_MS);
 	}
 	//vRingbufferDelete(rb);
 	distance = distance/num_measurements;
 	return distance;
+	
 }
 
 static void wifi_init_sta()
@@ -431,8 +435,8 @@ void init_main()
 	printf("Check Efuse\n");
 	check_efuse();
 
-	my_status.return_distance = HCSR04_measure(NUM_DISTANCE_MEASUREMENTS)-1.0;
 	my_status.last_measured_distance = HCSR04_measure(NUM_DISTANCE_MEASUREMENTS);
+	my_status.return_distance = my_status.last_measured_distance -1.0;
 	my_status.last_measured_moisture = 0.0;
 	my_status.mqtt_message_listener = true;
 	my_status.wifi_connected = 0;
